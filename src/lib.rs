@@ -11,6 +11,7 @@ enum MetadataUrls {
     Hostname,
     LocalHostname,
     PublicHostname,
+    SpotInstanceAction,
 }
 
 impl Into<&'static str> for MetadataUrls {
@@ -29,7 +30,10 @@ impl Into<&'static str> for MetadataUrls {
             MetadataUrls::LocalHostname => "http://169.254.169.254/latest/meta-data/local-hostname",
             MetadataUrls::PublicHostname => {
                 "http://169.254.169.254/latest/meta-data/public-hostname"
-            }
+            },
+            MetadataUrls::SpotInstanceAction => {
+                "http://169.254.169.254/latest/meta-data/spot/instance-action"
+            },
         }
     }
 }
@@ -247,6 +251,20 @@ impl InstanceMetadataClient {
             None
         };
 
+        let spot_instance_action_resp = ureq::get(MetadataUrls::SpotInstanceAction.into())
+            .set("X-aws-ec2-metadata-token", &token)
+            .timeout_connect(Self::REQUEST_TIMEOUT_MS)
+            .call();
+
+        // "public-hostname" isn't always available - the instance must be configured
+        // to support having one assigned.
+        let spot_instance_action = if spot_instance_action_resp.ok() {
+            let as_string = spot_instance_action_resp.into_string()?;
+            Some(SpotInstanceAction::from_json_string(&as_string)?)
+        } else {
+            None
+        };
+
         let metadata = InstanceMetadata {
             region,
             availability_zone,
@@ -257,6 +275,7 @@ impl InstanceMetadataClient {
             hostname,
             local_hostname,
             public_hostname,
+            spot_instance_action,
         };
 
         Ok(metadata)
@@ -295,10 +314,35 @@ pub struct InstanceMetadata {
 
     /// AWS Instance Public Hostname - optionally available
     pub public_hostname: Option<String>,
+
+    /// AWS Spot Instance Action - optionally available if spot instance is marked to be stopped or
+    /// terminated
+    pub spot_instance_action: Option<SpotInstanceAction>,
 }
 
 impl std::fmt::Display for InstanceMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+/// `SpotInstanceAction` holds the spot instance action.
+/// See: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-interruptions.html#instance-action-metadata
+#[derive(Debug, Clone)]
+pub struct SpotInstanceAction {
+    /// The action
+    pub action: String,
+
+    /// The time for the action
+    pub time: String,
+}
+
+impl SpotInstanceAction {
+    fn from_json_string(json_str: &str) -> Result<SpotInstanceAction> {
+        let parsed = json::parse(json_str)?;
+        Ok(SpotInstanceAction {
+            action: parsed["action"].to_string(),
+            time: parsed["time"].to_string(),
+        })
     }
 }
